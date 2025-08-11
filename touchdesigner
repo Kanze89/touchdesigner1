@@ -1,3 +1,268 @@
-o = op('/project1/unitel_face_particles')
-if o: o.destroy()
-print('Cleared /project1/unitel_face_particles')
+# TouchDesigner Auto-Builder (Fixed Types v2)
+# Azure Kinect → Face-reactive particles when present; after 3s idle particles form "UNITEL".
+#
+# How to run:
+# 1) Create a Text DAT, open editor (Alt+E), paste this, Ctrl+S.
+# 2) With the DAT selected, press Ctrl+R (Run Script).
+# 3) Go to /project1/unitel_face_particles and File → Save As… your .toe.
+
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
+
+def dbg(msg):
+    print('[TD-BUILD]', msg)
+
+
+def ensure(parent, optype, name):
+    """Create operator (exact TD type string) or return existing."""
+    o = parent.op(name)
+    if o:
+        return o
+    try:
+        return parent.create(optype, name)
+    except Exception as e:
+        dbg(f"Could not create {name} ({optype}): {e}")
+        raise
+
+
+def wire(src, dst, idx=0):
+    try:
+        dst.setInput(idx, src)
+    except Exception as e:
+        dbg(f"Wire failed {src.path} → {dst.path}: {e}")
+
+# -------------------------------------------------
+# Build network
+# -------------------------------------------------
+
+def build():
+    proj = op('/project1')
+
+    # Top container
+    base = proj.op('unitel_face_particles')
+    if not base:
+        base = proj.create('baseCOMP', 'unitel_face_particles')
+        base.nodeX, base.nodeY = 300, 100
+    dbg(f'Base: {base.path}')
+
+    # Sub containers
+    kinect  = base.op('kinect')   or base.create('baseCOMP', 'kinect')
+    targets = base.op('targets')  or base.create('baseCOMP', 'targets')
+    logic   = base.op('logic')    or base.create('baseCOMP', 'logic')
+    parts   = base.op('particles') or base.create('baseCOMP', 'particles')
+
+    kinect.nodeX,  kinect.nodeY  = -400, 100
+    targets.nodeX, targets.nodeY = -100, 100
+    logic.nodeX,   logic.nodeY   = -200, -200
+    parts.nodeX,   parts.nodeY   =  200, 100
+
+    # -----------------------------
+    # Kinect + Face pipeline
+    # -----------------------------
+    # Color source (Azure Kinect or placeholder Movie File In)
+    try:
+        in_color = ensure(kinect, 'kinectazureTOP', 'in_color')
+    except:
+        in_color = ensure(kinect, 'moviefileinTOP', 'in_color')
+        in_color.par.play = True
+        in_color.color = (1.0, 0.5, 0.5)
+        in_color.comment = 'Placeholder for Kinect Color'
+
+    # Body CHOP (presence) or placeholder
+    try:
+        in_body = ensure(kinect, 'kinectazureCHOP', 'in_body')
+    except:
+        in_body = ensure(kinect, 'nullCHOP', 'in_body')
+        in_body.color = (1.0, 0.5, 0.5)
+        in_body.comment = 'Placeholder for Kinect Body CHOP'
+
+    # Face TOP (try both name variants; else placeholder)
+    face = None
+    for t in ('faceTrackTOP', 'facetrackTOP'):
+        if face is None:
+            try:
+                face = ensure(kinect, t, 'face')
+            except:
+                face = None
+    if face is None:
+        dbg('Face Track TOP not available → using Null placeholder.')
+        face = ensure(kinect, 'nullTOP', 'face')
+        face.comment = 'Placeholder for Face Track TOP. Replace with a real face tracker or component.'
+    wire(in_color, face, 0)
+
+    # Face mask pipeline
+    crop_face   = ensure(kinect, 'cropTOP',    'crop_face')
+    resize_face = ensure(kinect, 'resizeTOP',  'resize_face')
+    try:
+        mask_face = ensure(kinect, 'thresholdTOP', 'mask_face')
+    except:
+        mask_face = ensure(kinect, 'levelTOP', 'mask_face')
+    wire(face,        crop_face)
+    wire(crop_face,   resize_face)
+    wire(resize_face, mask_face)
+
+    # -----------------------------
+    # Targets: UNITEL mask & GLSL position maps
+    # -----------------------------
+    text = ensure(targets, 'textTOP', 'unitel_text')
+    text.par.text = 'UNITEL'
+    text.par.resolutionw = 1024
+    text.par.resolutionh = 512
+
+    unitel_res  = ensure(targets, 'resolutionTOP', 'unitel_res')
+    unitel_mask = ensure(targets, 'levelTOP',      'mask_unitel')
+    wire(text, unitel_res)
+    wire(unitel_res, unitel_mask)
+
+    glsl_face   = ensure(targets, 'glslTOP', 'glsl_facePos')
+    glsl_unitel = ensure(targets, 'glslTOP', 'glsl_unitelPos')
+
+    # Shader DAT
+    posfrag = base.op('posmap_frag') or base.create('textDAT', 'posmap_frag')
+    posfrag.text = (
+        """
+// posmap.frag — XYZ in RGB, Active flag in A
+// We sample the mask and infer resolution from the mask itself.
+uniform sampler2D uMask;  // TOP input 0
+
+out vec4 fragColor;
+
+float hash(vec2 p){
+    return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453);
+}
+
+void main(){
+    vec2 pix = gl_FragCoord.xy;
+    vec2 sz  = vec2(textureSize(uMask, 0));
+    vec2 uv  = pix / sz;
+    float m  = texture(uMask, uv).r;
+
+    vec2 pos = (uv * 2.0 - 1.0) * vec2(1.6, 0.6);
+    float n  = hash(uv * 1000.0);
+    pos += (n - 0.5) * 0.02;
+
+    float z = 0.0;
+    float active = step(0.5, m);
+    fragColor = vec4(pos.x, pos.y, z, active);
+}
+        """.strip()
+    )
+
+    # Bind shader and uniforms
+    for g in (glsl_face, glsl_unitel):
+        try:
+            # Try both param names used by different TD builds
+            if hasattr(g.par, 'pixelshader'):
+                g.par.pixelshader = posfrag
+            else:
+                g.par.pixelcode = posfrag
+            g.par.resolutionw = 1024
+            g.par.resolutionh = 512
+            if hasattr(g.par, 'top1name'):
+                g.par.top1name = 'uMask'
+        except Exception as e:
+            dbg(f'GLSL param set skipped: {e}')
+
+    wire(mask_face,   glsl_face,   0)
+    wire(unitel_mask, glsl_unitel, 0)
+
+    # -----------------------------
+    # Logic: presence + 3s idle
+    # -----------------------------
+    sel_num = ensure(logic, 'selectCHOP', 'sel_numBodies')
+    sel_num.par.renameto = 'numBodies'
+    try:
+        sel_num.par.channames = 'numBodies'
+        wire(in_body, sel_num)
+    except:
+        pass
+
+    distance_ok = ensure(logic, 'constantCHOP', 'distanceOK')
+    distance_ok.par.value0 = 1
+    distance_ok.par.renameto = 'distanceOK'
+
+    math_present = ensure(logic, 'mathCHOP', 'math_present')
+    wire(sel_num,     math_present, 0)
+    wire(distance_ok, math_present, 1)
+    math_present.par.combinechans = 'multiply'
+
+    present_logic = ensure(logic, 'logicCHOP', 'present_logic')
+    wire(math_present, present_logic)
+    present_logic.par.convert = 'onifabove'
+    present_logic.par.highthreshold = 0.5
+
+    idle_timer = ensure(logic, 'timerCHOP', 'idle_timer')
+    idle_timer.par.length = 3.0
+
+    # Start/stop timer when present changes
+    execdat = logic.op('present_exec') or logic.create('chopexecDAT', 'present_exec')
+    execdat.par.chop = present_logic
+    execdat.par.valuechange = True
+    execdat.text = (
+        """
+# Fires when present changes
+
+def onValueChange(channel, sampleIndex, val, prev):
+    t = op('idle_timer')
+    if val >= 0.5:
+        t.par.stop.pulse()
+        t.par.reset.pulse()
+    else:
+        t.par.start.pulse()
+    return
+        """.strip()
+    )
+
+    idle_frac = ensure(logic, 'selectCHOP', 'sel_idleFraction')
+    try:
+        wire(idle_timer, idle_frac)
+        idle_frac.par.channames = 'fraction'
+    except:
+        pass
+
+    idle_ready = ensure(logic, 'logicCHOP', 'idle_ready_logic')
+    wire(idle_frac, idle_ready)
+    idle_ready.par.convert = 'onifabove'
+    idle_ready.par.highthreshold = 0.999
+
+    # -----------------------------
+    # Particles target switch
+    # -----------------------------
+    target_switch = ensure(parts, 'switchTOP', 'target_switch')
+    wire(glsl_face,   target_switch, 0)
+    wire(glsl_unitel, target_switch, 1)
+    try:
+        target_switch.par.index.expr = "op('../logic/idle_ready_logic')[0]"
+    except Exception as e:
+        dbg(f'Switch expr not set: {e}')
+
+    # Placeholder for Palette → particlesGPU
+    gpu_box = parts.op('particlesGPU1') or parts.create('baseCOMP', 'particlesGPU1')
+    gpu_box.comment = 'Drop Palette → particlesGPU here; set its Target Position Map to ../target_switch'
+    gpu_box.color = (0.5, 0.8, 1.0)
+
+    out_top = ensure(parts, 'nullTOP', 'OUT')
+    wire(target_switch, out_top)
+    out_top.viewer = True
+    out_top.par.display = True
+
+    # README
+    notes = base.op('README') or base.create('textDAT', 'README')
+    notes.text = (
+        """
+TouchDesigner Build Notes:
+
+1) If Azure/Face ops are missing, replace placeholders in /kinect with kinectazureTOP/CHOP and a Face Track component.
+2) In /targets, GLSL TOPs (glsl_facePos, glsl_unitelPos) use code in /posmap_frag.
+   - Set their Pixel Format to **32-bit float (RGBA32f)**.
+3) /logic flips to UNITEL after 3s of no person.
+4) In /particles, drop Palette → particlesGPU inside particlesGPU1 and set Target Position Map to ../target_switch.
+5) View /particles/OUT.
+        """.strip()
+    )
+
+    dbg('Build complete. Go to /project1/unitel_face_particles. Then File → Save As… your .toe')
+
+# Run
+build()
