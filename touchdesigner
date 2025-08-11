@@ -1,142 +1,126 @@
-# TouchDesigner Auto-Builder
+# TouchDesigner Auto-Builder (Fixed Types)
 # Creates a ready-to-wire network for Azure Kinect → Face particles when present,
-# and after 3s idle, particles form the text "UNITEL". Run this inside TouchDesigner
-# (paste into a Text DAT and press Ctrl+R / "Run Script"). Then File → Save As… to create your .toe.
-
-# Safe to run multiple times; it will create/update a single container named 'unitel_face_particles'.
-
-# Notes:
-# - If some operator types are missing (e.g., Azure Kinect), placeholders will be created so you can swap them manually.
-# - A GLSL fragment (posmap.frag) DAT is created; assign it to the GLSL TOPs if not auto-bound in your build.
+# and after 3s idle, particles form the text "UNITEL".
+#
+# ▶ How to run:
+#   1) Create a Text DAT in TouchDesigner, open it (Alt+E), paste this, Ctrl+S.
+#   2) With the Text DAT selected, press Ctrl+R (Run Script).
+#   3) After it builds, go to /project1/unitel_face_particles and Save As… your .toe.
+#
+# NOTE: TouchDesigner create() needs exact operator type names like 'baseCOMP', 'textTOP',
+#       'logicCHOP', 'chopexecDAT', etc. This script uses the correct ones.
 
 # ---------------------------------------------
-# Helpers
+# Tiny helpers
 # ---------------------------------------------
 
-def ensure(comp, optype, name, family_hint=None):
-    """Create operator of given type under comp, or return existing.
-    If creation fails (type missing), create a Null placeholder and tag it.
-    family_hint: 'TOP'/'CHOP' to disambiguate (optional).
+def dbg(msg):
+    print('[TD-BUILD]', msg)
+
+
+def ensure(parent, optype, name):
+    """Create op of given type under parent or return existing.
+    optype must be an exact TD operator type string (e.g., 'textTOP').
     """
-    opath = f"{comp.path}/{name}"
-    o = op(opath)
-    if o:
+    o = parent.op(name)
+    if o: 
         return o
     try:
-        # If family_hint provided, create via that menu to reduce type ambiguity
-        if family_hint == 'TOP':
-            return comp.create(optype, name=name)
-        elif family_hint == 'CHOP':
-            return comp.create(optype, name=name)
-        else:
-            return comp.create(optype, name=name)
+        o = parent.create(optype, name)
+        return o
     except Exception as e:
-        ph = comp.create('null', name)
-        ph.color = (1.0, 0.4, 0.4)
-        ph.tags.add('PLACEHOLDER')
-        ph.par.comment = f"Placeholder for missing type: {optype}. Error: {e}"
-        debug(f"[Placeholder] {name}: {optype} not available → created Null.")
-        return ph
+        dbg(f"Could not create {name} ({optype}): {e}")
+        raise
 
 
-def wire(o_src, o_dst, input_index=0):
+def wire(src, dst, idx=0):
     try:
-        o_dst.setInput(input_index, o_src)
+        dst.setInput(idx, src)
     except Exception as e:
-        debug(f"[Wire] Could not connect {o_src.path} -> {o_dst.path}: {e}")
-
-
-def debug(msg):
-    print("[TD-BUILD]", msg)
+        dbg(f"Wire failed {src.path} → {dst.path}: {e}")
 
 # ---------------------------------------------
-# Build
+# Build network
 # ---------------------------------------------
 
 def build():
-    root = op('/project1') or op('/')
+    proj = op('/project1')
 
-    # Create a top-level container for this system
-    base = op('/project1/unitel_face_particles')
+    # Base container
+    base = proj.op('unitel_face_particles')
     if not base:
-        base = root.create('base', 'unitel_face_particles')
-        base.nodeX = 300
-        base.nodeY = 100
-    debug(f"Base COMP: {base.path}")
+        base = proj.create('baseCOMP', 'unitel_face_particles')
+        base.nodeX, base.nodeY = 300, 100
+    dbg(f'Base: {base.path}')
 
-    # Sub COMPs
-    kinect = op(base.path + '/kinect') or base.create('base', 'kinect')
-    targets = op(base.path + '/targets') or base.create('base', 'targets')
-    logic = op(base.path + '/logic') or base.create('base', 'logic')
-    particles = op(base.path + '/particles') or base.create('base', 'particles')
+    # Sub containers
+    kinect  = base.op('kinect')  or base.create('baseCOMP', 'kinect')
+    targets = base.op('targets') or base.create('baseCOMP', 'targets')
+    logic   = base.op('logic')   or base.create('baseCOMP', 'logic')
+    parts   = base.op('particles') or base.create('baseCOMP', 'particles')
 
-    kinect.nodeX, kinect.nodeY = -400, 100
+    kinect.nodeX,  kinect.nodeY  = -400, 100
     targets.nodeX, targets.nodeY = -100, 100
-    logic.nodeX, logic.nodeY = -200, -200
-    particles.nodeX, particles.nodeY = 200, 100
+    logic.nodeX,   logic.nodeY   = -200, -200
+    parts.nodeX,   parts.nodeY   =  200, 100
 
-    # -----------------------------------------
-    # Kinect / Face pipeline
-    # -----------------------------------------
-    in_color  = ensure(kinect, 'kinectazure', 'in_color', family_hint='TOP')
-    in_body   = ensure(kinect, 'kinectazure', 'in_body', family_hint='CHOP')
-    face_top  = ensure(kinect, 'facetrack', 'face', family_hint='TOP')
-
-    # Fallbacks if Azure/FaceTrack not present
-    if in_color.family != TOP:
-        debug('Azure Kinect TOP missing → Using a Movie File In TOP as placeholder.')
-        in_color.destroy()
-        in_color = ensure(kinect, 'moviefilein', 'in_color', family_hint='TOP')
-        in_color.par.play = True
-    if in_body.family != CHOP:
-        debug('Azure Kinect CHOP missing → Creating Null CHOP placeholder.')
-        in_body.destroy()
-        in_body = ensure(kinect, 'null', 'in_body', family_hint='CHOP')
-
-    # Face track needs color input
-    wire(in_color, face_top, 0)
-
-    # Face mask pipeline
-    crop_face = ensure(kinect, 'crop', 'crop_face', family_hint='TOP')
-    resize_face = ensure(kinect, 'resize', 'resize_face', family_hint='TOP')
-    # Prefer threshold; if not available, Level as fallback
-    thresh_type = 'threshold'
+    # -----------------------------
+    # Kinect + Face pipeline
+    # -----------------------------
+    # Try to create Azure Kinect TOP/CHOP. If those types are unavailable, create placeholders you can replace.
     try:
-        mask_face = ensure(kinect, thresh_type, 'mask_face', family_hint='TOP')
+        in_color = ensure(kinect, 'kinectazureTOP', 'in_color')
     except:
-        mask_face = ensure(kinect, 'level', 'mask_face', family_hint='TOP')
+        in_color = ensure(kinect, 'moviefileinTOP', 'in_color')
+        in_color.par.play = True
+        in_color.color = (1.0, 0.5, 0.5)
+        in_color.par.comment = 'Placeholder for Kinect Color'
 
-    wire(face_top, crop_face)
-    wire(crop_face, resize_face)
+    try:
+        in_body = ensure(kinect, 'kinectazureCHOP', 'in_body')
+    except:
+        in_body = ensure(kinect, 'nullCHOP', 'in_body')
+        in_body.color = (1.0, 0.5, 0.5)
+        in_body.par.comment = 'Placeholder for Kinect Body CHOP'
+
+    face = ensure(kinect, 'facetrackTOP', 'face')
+    wire(in_color, face, 0)
+
+    crop_face   = ensure(kinect, 'cropTOP',      'crop_face')
+    resize_face = ensure(kinect, 'resizeTOP',    'resize_face')
+    # mask via threshold (fallback to level)
+    try:
+        mask_face = ensure(kinect, 'thresholdTOP', 'mask_face')
+    except:
+        mask_face = ensure(kinect, 'levelTOP', 'mask_face')
+
+    wire(face,        crop_face)
+    wire(crop_face,   resize_face)
     wire(resize_face, mask_face)
 
-    # -----------------------------------------
-    # Targets: UNITEL mask → GLSL, Face mask → GLSL
-    # -----------------------------------------
-    text = ensure(targets, 'text', 'unitel_text', family_hint='TOP')
+    # -----------------------------
+    # Targets: UNITEL mask & GLSL pos maps
+    # -----------------------------
+    text = ensure(targets, 'textTOP', 'unitel_text')
     text.par.text = 'UNITEL'
     text.par.resolutionw = 1024
     text.par.resolutionh = 512
 
-    unitel_res = ensure(targets, 'resolution', 'unitel_res', family_hint='TOP')
-    unitel_mask = ensure(targets, 'level', 'mask_unitel', family_hint='TOP')
-
+    unitel_res  = ensure(targets, 'resolutionTOP', 'unitel_res')
+    unitel_mask = ensure(targets, 'levelTOP',      'mask_unitel')
     wire(text, unitel_res)
     wire(unitel_res, unitel_mask)
 
-    # GLSL TOPs for baking position maps
-    glsl_face = ensure(targets, 'glsl', 'glsl_facePos', family_hint='TOP')
-    glsl_unitel = ensure(targets, 'glsl', 'glsl_unitelPos', family_hint='TOP')
+    glsl_face   = ensure(targets, 'glslTOP', 'glsl_facePos')
+    glsl_unitel = ensure(targets, 'glslTOP', 'glsl_unitelPos')
 
-    # Create a DAT with the fragment shader code
-    posmap_dat = op(base.path + '/posmap_frag')
-    if not posmap_dat:
-        posmap_dat = base.create('text', 'posmap_frag')
-    posmap_dat.text = (
+    # Create shader DAT and bind to GLSL TOPs
+    posfrag = base.op('posmap_frag') or base.create('textDAT', 'posmap_frag')
+    posfrag.text = (
         """
 // posmap.frag — XYZ in RGB, Active flag in A
-uniform sampler2D uMask;
-uniform vec2 uRes;
+// We sample the mask and infer resolution from the mask itself.
+uniform sampler2D uMask;  // TOP input 0
 
 out vec4 fragColor;
 
@@ -146,7 +130,8 @@ float hash(vec2 p){
 
 void main(){
     vec2 pix = gl_FragCoord.xy;
-    vec2 uv  = pix / uRes;
+    vec2 sz  = vec2(textureSize(uMask, 0));
+    vec2 uv  = pix / sz;
     float m  = texture(uMask, uv).r;
 
     vec2 pos = (uv * 2.0 - 1.0) * vec2(1.6, 0.6);
@@ -160,64 +145,55 @@ void main(){
         """.strip()
     )
 
-    # Try binding shader DATs
-    for glsl in (glsl_face, glsl_unitel):
+    for g in (glsl_face, glsl_unitel):
         try:
-            glsl.par.pixelshader = posmap_dat
-            glsl.par.resolutionw = 1024
-            glsl.par.resolutionh = 512
-            # Map uniforms: uMask as TOP input 0, uRes as const
-            glsl.par.top1 = None  # will assign per-instance below
-            glsl.par.top1name = 'uMask'
-            glsl.par.uniform1 = 'uRes'
-            glsl.par.uniform1x = 1024
-            glsl.par.uniform1y = 512
+            g.par.pixelshader = posfrag
+            g.par.resolutionw = 1024
+            g.par.resolutionh = 512
+            g.par.top1 = None
+            g.par.top1name = 'uMask'
+            # IMPORTANT: After build, set GLSL TOP → Pixel Format to 32-bit float (RGBA32f) manually if needed.
         except Exception as e:
-            debug(f"GLSL param setup skipped: {e}")
+            dbg(f'GLSL param set skipped: {e}')
 
-    # Connect masks to GLSL (as TOP input 0)
-    wire(mask_face, glsl_face, 0)
+    wire(mask_face,   glsl_face,   0)
     wire(unitel_mask, glsl_unitel, 0)
 
-    # -----------------------------------------
-    # Logic: present detection, timer for idle → UNITEL
-    # -----------------------------------------
-    # Extract numBodies if available; fallback to 0/1 toggle button
-    select_num = ensure(logic, 'select', 'sel_numBodies', family_hint='CHOP')
-    select_num.par.renameto = 'numBodies'
+    # -----------------------------
+    # Logic: present detection & 3s idle timer
+    # -----------------------------
+    sel_num = ensure(logic, 'selectCHOP', 'sel_numBodies')
+    sel_num.par.renameto = 'numBodies'
     try:
-        select_num.par.channames = 'numBodies'
-        wire(in_body, select_num)
-    except Exception:
+        sel_num.par.channames = 'numBodies'
+        wire(in_body, sel_num)
+    except:
         pass
 
-    # Distance gate (optional): create a constant CHOP "distanceOK" = 1
-    distance_ok = ensure(logic, 'constant', 'distanceOK', family_hint='CHOP')
+    distance_ok = ensure(logic, 'constantCHOP', 'distanceOK')
     distance_ok.par.value0 = 1
     distance_ok.par.renameto = 'distanceOK'
 
-    # Present = (numBodies >= 1) AND (distanceOK)
-    math_present = ensure(logic, 'math', 'math_present', family_hint='CHOP')
-    wire(select_num, math_present, 0)
+    math_present = ensure(logic, 'mathCHOP', 'math_present')
+    wire(sel_num,     math_present, 0)
     wire(distance_ok, math_present, 1)
     math_present.par.combinechans = 'multiply'
 
-    logic_present = ensure(logic, 'logic', 'present_logic', family_hint='CHOP')
-    wire(math_present, logic_present)
-    logic_present.par.convert = 'onifabove'
-    logic_present.par.highthreshold = 0.5
+    present_logic = ensure(logic, 'logicCHOP', 'present_logic')
+    wire(math_present, present_logic)
+    present_logic.par.convert = 'onifabove'
+    present_logic.par.highthreshold = 0.5
 
-    # Idle timer (3s after not present)
-    invert = ensure(logic, 'math', 'invert_present', family_hint='CHOP')
-    wire(logic_present, invert)
+    invert = ensure(logic, 'mathCHOP', 'invert_present')
+    wire(present_logic, invert)
     invert.par.expr0 = '1 - me.inputVal'
 
-    idle_timer = ensure(logic, 'timer', 'idle_timer', family_hint='CHOP')
+    idle_timer = ensure(logic, 'timerCHOP', 'idle_timer')
     idle_timer.par.length = 3.0
 
-    # CHOP Execute DAT to start/stop timer when present changes
-    execdat = op(logic.path + '/present_exec') or logic.create('chopexec', 'present_exec')
-    execdat.par.chop = logic_present
+    # CHOP Execute for starting/stopping the timer
+    execdat = logic.op('present_exec') or logic.create('chopexecDAT', 'present_exec')
+    execdat.par.chop = present_logic
     execdat.par.valuechange = True
     execdat.text = (
         """
@@ -234,57 +210,56 @@ def onValueChange(channel, sampleIndex, val, prev):
         """.strip()
     )
 
-    # When timer finishes → idle_ready_logic = 1
-    idle_frac = ensure(logic, 'select', 'sel_idleFraction', family_hint='CHOP')
+    idle_frac = ensure(logic, 'selectCHOP', 'sel_idleFraction')
     try:
         wire(idle_timer, idle_frac)
         idle_frac.par.channames = 'fraction'
-    except Exception:
+    except:
         pass
 
-    idle_ready_logic = ensure(logic, 'logic', 'idle_ready_logic', family_hint='CHOP')
-    wire(idle_frac, idle_ready_logic)
-    idle_ready_logic.par.convert = 'onifabove'
-    idle_ready_logic.par.highthreshold = 0.999
+    idle_ready = ensure(logic, 'logicCHOP', 'idle_ready_logic')
+    wire(idle_frac, idle_ready)
+    idle_ready.par.convert = 'onifabove'
+    idle_ready.par.highthreshold = 0.999
 
-    # -----------------------------------------
-    # Particles + Switch target
-    # -----------------------------------------
-    target_switch = ensure(particles, 'switch', 'target_switch', family_hint='TOP')
-    wire(glsl_face, target_switch, 0)
+    # -----------------------------
+    # Particles target switch
+    # -----------------------------
+    target_switch = ensure(parts, 'switchTOP', 'target_switch')
+    wire(glsl_face,   target_switch, 0)
     wire(glsl_unitel, target_switch, 1)
 
-    # Expression to flip to UNITEL after idle ready (0=face, 1=text)
     try:
         target_switch.par.index.expr = "op('../logic/idle_ready_logic')[0]"
     except Exception as e:
-        debug(f"Switch index expr not set: {e}")
+        dbg(f'Switch expr not set: {e}')
 
-    # Particles system placeholder (user can replace with Palette: particlesGPU)
-    # We'll create a container and advise user to drop particlesGPU inside
-    gpu_comp = op(particles.path + '/particlesGPU1') or particles.create('base', 'particlesGPU1')
-    gpu_comp.par.comment = (
-        "Drop Palette → particlesGPU here and wire its Target Position Map input to ../target_switch.\n"
-        "Or use your own GPU particle sim reading XYZ from RGBA position map."
-    )
-    gpu_comp.color = (0.5, 0.8, 1.0)
+    # Placeholder container for your particlesGPU
+    gpu_box = parts.op('particlesGPU1') or parts.create('baseCOMP', 'particlesGPU1')
+    gpu_box.par.comment = ('Drop Palette → particlesGPU here and wire its Target Position Map to ../target_switch')
+    gpu_box.color = (0.5, 0.8, 1.0)
 
-    # Convenience OUT TOP for final comp
-    out_top = ensure(particles, 'null', 'OUT', family_hint='TOP')
+    out_top = ensure(parts, 'nullTOP', 'OUT')
     wire(target_switch, out_top)
-    out_top.par.display = True
     out_top.viewer = True
+    out_top.par.display = True
 
-    # -----------------------------------------
-    # Final notes in a DAT
-    # -----------------------------------------
-    notes = op(base.path + '/README') or base.create('text', 'README')
+    # README
+    notes = base.op('README') or base.create('textDAT', 'README')
     notes.text = (
         """
-TouchDesigner Build Notes:\n\n1) If Azure Kinect / Face Track operators were missing, red placeholders were created. Replace them with your actual devices:\n   - /unitel_face_particles/kinect/in_color  → Kinect Azure TOP (or your camera)\n   - /unitel_face_particles/kinect/in_body   → Kinect Azure CHOP (Body Tracking)\n   - /unitel_face_particles/kinect/face      → Face Track TOP (landmarks on)\n\n2) GLSL position maps are in /targets (glsl_facePos, glsl_unitelPos). Shader code in /posmap_frag.\n   - Make sure each GLSL TOP uses posmap_frag as Pixel Shader, with uniforms:\n     * uMask → TOP input 0 (face/text mask)\n     * uRes  → vec2(1024, 512)\n\n3) Target switching:\n   - /logic/present_logic goes 1 when a person is detected.\n   - /logic/idle_timer counts to 3s when no one present.\n   - /logic/idle_ready_logic flips 1 after 3s → /particles/target_switch Index goes 1 (UNITEL).\n\n4) Particles:\n   - Drop Palette → particlesGPU inside /particles/particlesGPU1 and wire its Target Position Map input to ../target_switch.\n   - Tune follow strength, noise, and damping.\n\n5) Save project:\n   - File → Save As… → choose a filename to create your .toe.\n        """.strip()
+TouchDesigner Build Notes:
+
+1) If you don't see Kinect operators, replace the placeholders in /kinect with kinectazureTOP/CHOP.
+2) In /targets, the GLSL TOPs (glsl_facePos, glsl_unitelPos) use the code in /posmap_frag.
+   - Set their Pixel Format to **32-bit float (RGBA32f)** in parameters.
+3) /logic controls switching after 3s of no person.
+4) In /particles, drop Palette → particlesGPU inside particlesGPU1 and set its Target Position Map to ../target_switch.
+5) View /particles/OUT to see the result.
+        """.strip()
     )
 
-    debug('Build complete. Go to /project1/unitel_face_particles. If all looks good, Save As… your .toe.')
+    dbg('Build complete. Go to /project1/unitel_face_particles. Then File → Save As… your .toe')
 
-# Run builder when script executes
+# Run
 build()
