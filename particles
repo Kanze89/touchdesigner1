@@ -1,0 +1,8 @@
+p = op('/project1/unitel_face_particles/particles')
+if not p:
+    raise Exception("Folder /project1/unitel_face_particles/particles not found. Re-run the builder script first.")
+g = p.op('particlesGPU1') or p.create('baseCOMP', 'particlesGPU1')
+g.color = (0.5, 0.8, 1.0)
+g.nodeX, g.nodeY = 0, 0
+ui.panes[0].owner = p  # jump the first network pane to the particles folder
+print("Ready at /project1/unitel_face_particles/particles/particlesGPU1")
