@@ -67,7 +67,7 @@ def build():
         in_color = ensure(kinect, 'moviefileinTOP', 'in_color')
         in_color.par.play = True
         in_color.color = (1.0, 0.5, 0.5)
-        in_color.par.comment = 'Placeholder for Kinect Color'
+        in_color.comment = 'Placeholder for Kinect Color'
 
     # Body CHOP (presence) or placeholder
     try:
@@ -75,7 +75,7 @@ def build():
     except:
         in_body = ensure(kinect, 'nullCHOP', 'in_body')
         in_body.color = (1.0, 0.5, 0.5)
-        in_body.par.comment = 'Placeholder for Kinect Body CHOP'
+        in_body.comment = 'Placeholder for Kinect Body CHOP'
 
     # Face TOP (try both name variants; else placeholder)
     face = None
@@ -88,7 +88,7 @@ def build():
     if face is None:
         dbg('Face Track TOP not available → using Null placeholder.')
         face = ensure(kinect, 'nullTOP', 'face')
-        face.par.comment = 'Placeholder for Face Track TOP. Replace with a real face tracker or component.'
+        face.comment = 'Placeholder for Face Track TOP. Replace with a real face tracker or component.'
     wire(in_color, face, 0)
 
     # Face mask pipeline
@@ -152,11 +152,15 @@ void main(){
     # Bind shader and uniforms
     for g in (glsl_face, glsl_unitel):
         try:
-            # IMPORTANT: parameter name is pixelcode (not pixelshader)
-            g.par.pixelcode = posfrag
+            # Try both param names used by different TD builds
+            if hasattr(g.par, 'pixelshader'):
+                g.par.pixelshader = posfrag
+            else:
+                g.par.pixelcode = posfrag
             g.par.resolutionw = 1024
             g.par.resolutionh = 512
-            g.par.top1name = 'uMask'
+            if hasattr(g.par, 'top1name'):
+                g.par.top1name = 'uMask'
         except Exception as e:
             dbg(f'GLSL param set skipped: {e}')
 
@@ -235,7 +239,7 @@ def onValueChange(channel, sampleIndex, val, prev):
 
     # Placeholder for Palette → particlesGPU
     gpu_box = parts.op('particlesGPU1') or parts.create('baseCOMP', 'particlesGPU1')
-    gpu_box.par.comment = 'Drop Palette → particlesGPU here; set its Target Position Map to ../target_switch'
+    gpu_box.comment = 'Drop Palette → particlesGPU here; set its Target Position Map to ../target_switch'
     gpu_box.color = (0.5, 0.8, 1.0)
 
     out_top = ensure(parts, 'nullTOP', 'OUT')
