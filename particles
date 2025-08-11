@@ -1,21 +1,63 @@
-# Teleport to the folder and ensure particlesGPU1 exists
-proj  = op('/project1')
-base  = proj.op('unitel_face_particles') or proj.create('baseCOMP','unitel_face_particles')
-parts = base.op('particles') or base.create('baseCOMP','particles')
+# Re-create the UNITEL target map and wire it up
 
-pg1 = parts.op('particlesGPU1') or parts.create('baseCOMP','particlesGPU1')
-pg1.color  = (0.5, 0.8, 1.0)
-pg1.nodeX, pg1.nodeY = 0, 0
+proj   = op('/project1')
+base   = proj.op('unitel_face_particles') or proj.create('baseCOMP','unitel_face_particles')
+targets= base.op('targets') or base.create('baseCOMP','targets')
+parts  = base.op('particles') or base.create('baseCOMP','particles')
 
-# Show where you are and what exists
-print("Now at:", parts.path)
-for c in parts.children:
-    print(" -", c.path, "→", c.OPType)
+# Ensure UNITEL mask chain
+text = targets.op('unitel_text') or targets.create('textTOP','unitel_text')
+text.par.text = 'UNITEL'
+text.par.resolutionw = 1024
+text.par.resolutionh = 512
 
-# Focus the first pane on the particles folder so you can see it
+unitel_res  = targets.op('unitel_res')  or targets.create('resolutionTOP','unitel_res')
+unitel_mask = targets.op('mask_unitel') or targets.create('levelTOP','mask_unitel')
+unitel_res.setInput(0, text)
+unitel_mask.setInput(0, unitel_res)
+
+# Ensure shader DAT
+posfrag = base.op('posmap_frag') or base.create('textDAT','posmap_frag')
+if not posfrag.text or 'posmap.frag' not in posfrag.text:
+    posfrag.text = """// posmap.frag — XYZ in RGB, Active flag in A
+uniform sampler2D uMask;  // TOP input 0
+out vec4 fragColor;
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+void main(){
+  vec2 pix = gl_FragCoord.xy;
+  vec2 sz  = vec2(textureSize(uMask,0));
+  vec2 uv  = pix/sz;
+  float m  = texture(uMask, uv).r;
+  vec2 pos = (uv*2.0-1.0)*vec2(1.6,0.6);
+  float n  = hash(uv*1000.0);
+  pos += (n-0.5)*0.02;
+  fragColor = vec4(pos.x,pos.y,0.0, step(0.5,m));
+}"""
+
+# Create + bind GLSL for UNITEL
+g_unit = targets.op('glsl_unitelPos') or targets.create('glslTOP','glsl_unitelPos')
+# Different TD builds use pixelshader or pixelcode:
+if hasattr(g_unit.par, 'pixelshader'):
+    g_unit.par.pixelshader = posfrag
+else:
+    g_unit.par.pixelcode = posfrag
+g_unit.par.resolutionw = 1024
+g_unit.par.resolutionh = 512
+if hasattr(g_unit.par, 'top1name'):
+    g_unit.par.top1name = 'uMask'
+g_unit.setInput(0, unitel_mask)
+
+# Force float format via Convert TOP (safer across builds)
+fmt_unit = targets.op('fmt_unitel') or targets.create('convertTOP','fmt_unitel')
+fmt_unit.setInput(0, g_unit)
 try:
-    ui.panes[0].owner = parts
+    fmt_unit.par.pixelformat = '32-bit float RGBA'
 except:
-    pass
+    fmt_unit.par.pixelformat = '16-bit float RGBA'
 
-print("Done. You should now see 'particlesGPU1' inside:", parts.path)
+# Rewire /particles/target_switch input 1 to the formatted map
+sw = parts.op('target_switch') or parts.create('switchTOP','target_switch')
+sw.setInput(1, fmt_unit)
+
+print("Created glsl_unitelPos and wired it → /particles/target_switch input 1.")
+print("Find it at /project1/unitel_face_particles/targets (fmt_unitel → float RGBA).")
